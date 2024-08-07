@@ -1,0 +1,241 @@
+import { Storage } from '@google-cloud/storage';
+import * as crypto from 'crypto';
+import { IncomingMessage, ServerResponse } from 'http';
+import { parse } from 'querystring';
+
+interface FileContent {
+    file_content: string;
+}
+
+interface ErrorResponse {
+    error: string,
+    continua: boolean
+}
+
+
+const storage = new Storage();
+const bucketName = 'fs0';
+
+function random_number(): number {
+  const bytes = crypto.randomBytes(1);
+  const number = bytes[0] % 20 + 1;
+  return number;
+}
+
+async function getLastModified(filePath: string) {
+  const [metadata] = await storage.bucket(bucketName).file(filePath).getMetadata();
+  const modifiedTime = new Date(metadata.updated || Date.now()).getTime();
+  const currentTime = Date.now();
+  const timeDifference = currentTime - modifiedTime;
+  return { modified_timestamp: modifiedTime, time_difference: timeDifference };
+}
+
+function getRandomString(length: number): string {
+  return crypto.randomBytes(length).toString('hex').substring(0, length);
+}
+
+function encrypt(plaintext: string, iv_OTP: string, password: string) {
+  const method = 'aes-256-cbc';
+  const key = crypto.createHash('sha256').update(password).digest();
+    const iv = Buffer.from(iv_OTP, 'hex');
+    console.log({iv});
+  if (iv.length !== 16) {
+    throw new Error('IV must be 16 bytes long');
+  }
+
+  const cipher = crypto.createCipheriv(method, key, iv);
+  let encrypted = cipher.update(plaintext, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const hash = crypto.createHmac('sha256', key).update(encrypted + iv_OTP).digest('hex');
+  return { hash, cipher: encrypted };
+}
+
+function decrypt(iv_OTPREG: string, password: string, ciphertext: string) {
+  const method = 'aes-256-cbc';
+  const key = crypto.createHash('sha256').update(password).digest();
+  const iv = Buffer.from(iv_OTPREG, 'hex');
+  
+  if (iv.length !== 16) {
+    throw new Error('IV must be 16 bytes long');
+  }
+
+  const decipher = crypto.createDecipheriv(method, key, iv);
+  let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+}
+
+async function checkAndCreateFolderInBucket(bucketName: string, folderName: string): Promise<ErrorResponse> {
+  const storage = new Storage();
+  try {
+    const bucket = storage.bucket(bucketName);
+    const normalizedFolderName = folderName.endsWith('/') ? folderName : `${folderName}/`;
+    const [files] = await bucket.getFiles({ prefix: normalizedFolderName, delimiter: '/' });
+    if (files.length === 0) {
+      // Create an empty file to represent the folder
+      const file = bucket.file(`${normalizedFolderName}.keep`);
+      await file.save('');
+      return {"error": `Folder ${normalizedFolderName} created successfully in bucket ${bucketName}`, "continua": true};
+    } else {
+      return {"error": `Folder ${normalizedFolderName} already exists in bucket ${bucketName}`, "continua": true};
+    }
+  } catch (err) {
+    console.error('Error in checkAndCreateFolderInBucket:', err);
+    return {"error": JSON.stringify(err), "continua": false};
+  }
+}
+/*
+async function handleNewOTPRequest(res: ServerResponse) {
+    let fnp = "";
+    let password = null;
+    let iv_OTPREG = null;
+    let resource = "";
+    let text = "";
+    let filenameErrors = "";
+    try {
+	try {
+	    while (true) {
+		password = getRandomString(32);
+		iv_OTPREG = getRandomString(32);
+		const fn = crypto.createHash('sha512').update(password + iv_OTPREG).digest('hex');
+		fnp = `msgs/${fn}.js`;
+		const [exists] = await storage.bucket(bucketName).file(fnp).exists();
+		if (!exists) break;
+	    }
+	} catch (error) {
+	    console.error('Error in handleNewOTPRequest:', error);
+	    res.writeHead(500, { 'Content-Type': 'application/json' });
+	    res.end(JSON.stringify({ msg: "Internal Server Error (Creating File)", error }));
+	    return;
+	}
+	try {
+	    await storage.bucket(bucketName).file(fnp).save("");
+	} catch (error) {
+	    console.error('Error in handleNewOTPRequest:', error);
+	    res.writeHead(500, { 'Content-Type': 'application/json' });
+	    res.end(JSON.stringify({ msg: "Internal Server Error (Saving File)", error }));
+	    return;
+	}
+	try {
+	    const currentDateTime = new Date().toISOString().substring(0, 13); // 'YYYY-MM-DDTHH'
+	    const encryptedData = encrypt(currentDateTime, iv_OTPREG, password);
+	    text = Buffer.from(encryptedData.cipher, 'hex').toString('base64');
+	    resource = "";
+	    while (true) {
+		let fn = getRandomString(4);
+		fn = crypto.createHash('sha512').update(fn).digest('hex');
+		resource = `msgs/${fn}.js`;
+		const [exists] = await storage.bucket(bucketName).file(resource).exists();
+		if (!exists) break;
+	    }
+	    await storage.bucket(bucketName).file(resource).save(text);
+	    filenameErrors = `msgs/${crypto.createHash('sha512').update(password + iv_OTPREG).digest('hex')}.js.js`;
+	    await storage.bucket(bucketName).file(filenameErrors).save("");
+	} catch (error) {
+	    console.error('Error in handleNewOTPRequest:', error);
+	    res.writeHead(500, { 'Content-Type': 'application/json' });
+	    res.end({ msg: "Internal Server Error (Setting Date)", error });
+	    return;
+	}
+        res.writeHead(200, { 'Content-Type': 'text/javascript' });
+        res.end(`var filenamerrors="${filenameErrors}"; var colour_index=${random_number()}; var iv_OTPREG="${iv_OTPREG}"; var OTPREG="${password}";\nvar OTPREG_resource="${resource}";\n regprocessed=255;`);
+    } catch (error) {
+	console.error('Error in handleNewOTPRequest:', error);
+	res.writeHead(500, { 'Content-Type': 'application/json' });
+	res.end(JSON.stringify({ msg: "Internal Server Error (handleNewOTPRequest)", error }));
+	return;
+    }
+}
+*/
+function minus(mins: number): string {
+    const currentTime = Math.floor(Date.now() / 1000);
+    const newTime = currentTime - (mins * 60);
+    return new Date(newTime * 1000).toISOString().substring(0, 16).replace('T', ' ');
+}
+
+export const manageOTPRequest = async (req: IncomingMessage, res: ServerResponse) => {
+    if (req.method !== 'POST') {
+//        res.writeHead(405, { 'Content-Type': 'application/json' });
+	//        res.end(JSON.stringify({ error: "Method Not Allowed. Please use POST method." }));
+        await handleNewOTPRequest(res);
+        return;
+    }
+
+    let body = '';
+    req.on('data', chunk => {
+        body += chunk.toString();
+    });
+
+    req.on('end', async () => {
+        try {
+            const post = parse(body);
+            if (!post.iv_OTP || !post.OTP_resource || !post.OTP) {
+                await handleNewOTPRequest(res);
+            } else {
+                await handleExistingOTPRequest(res, post);
+            }
+        } catch (error) {
+            console.error('Error in manageOTPRequest:', error);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: "Internal Server Error" }));
+        }
+    });
+};
+
+async function handleNewOTPRequest(res: ServerResponse) {
+    try {
+        let OTP_resource = getRandomString(128);
+        const OTP = getRandomString(32);
+        const iv_OTP = getRandomString(32);
+
+        const fecha = new Date().toISOString().substring(0, 16).replace('T', ' ');
+        const ciphertext = encrypt(fecha, iv_OTP, OTP).cipher;
+
+        let filename = "";
+        while (true) {
+            OTP_resource = getRandomString(128);
+            filename = `msgs/${OTP_resource}.js`;
+            const [exists] = await storage.bucket(bucketName).file(filename).exists();
+            if (!exists) break;
+        }
+        await storage.bucket(bucketName).file(filename).save(ciphertext);
+        res.writeHead(200, { 'Content-Type': 'text/javascript' });
+        res.end(`var iv_OTP="${iv_OTP}"; var OTP_resource="${OTP_resource}"; var OTP="${OTP}"; var init_OTProcessed=255;error="Success"\n`);
+    } catch (error) {
+        console.error('Error in handleNewOTPRequest:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: "Internal Server Error" }));
+    }
+}
+
+async function handleExistingOTPRequest(res: ServerResponse, post: any) {
+    try {
+        const filename = `msgs/${post.OTP_resource}.js`;
+        const [ciphertext] = await storage.bucket(bucketName).file(filename).download();
+
+        const fecha2 = new Date().toISOString().substring(0, 16).replace('T', ' ');
+        const fecha1 = decrypt(post.iv_OTP, post.OTP, ciphertext.toString());
+
+        await storage.bucket(bucketName).file(filename).delete();
+
+        let mins = 0;
+        while (mins < 5) {
+            if (fecha1 === minus(mins)) break;
+            mins++;
+        }
+
+        if (mins < 5) {
+            const newFilename = getRandomString(128);
+            await storage.bucket(bucketName).file(`msgs/${newFilename}.js`).save(post.texto2);
+            res.writeHead(200, { 'Content-Type': 'text/javascript' });
+            res.end(`var error="Success";var filename="${newFilename}"`);
+        } else {
+            res.writeHead(200, { 'Content-Type': 'text/javascript' });
+            res.end(`var error="Could not decrypt ${mins} ${fecha1} ${fecha2}";`);
+        }
+    } catch (error) {
+        console.error('Error in handleExistingOTPRequest:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: "Internal Server Error" }));
+    }
+}
